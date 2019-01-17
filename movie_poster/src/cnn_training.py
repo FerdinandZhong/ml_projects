@@ -4,13 +4,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import tensorflow as tf
-import keras
-from keras.models import Sequential
-from keras.layers import Dense, Conv2D, MaxPooling2D, Dropout, Flatten
-from keras.losses import categorical_crossentropy
-from keras.optimizers import Adadelta
-from keras.callbacks import TensorBoard
-import time
+from sklearn.metrics import f1_score
 
 def poster_file(movie):
     return input_path / f"{movie[0]}.jpg"
@@ -54,12 +48,11 @@ def encode(series, uniques):
 def load_data(path):
     csv = path / "MovieGenre.csv"
     movies = pd.read_csv(csv, encoding="ISO-8859-1", usecols=['imdbId', 'Genre'], keep_default_na=False).sample(frac=0.05)
-    print(movies.shape)
     movies = movies[movies.apply(lambda d: has_genre(d) and has_poster(d), axis=1)]
     movies = movies.sample(frac=1).reset_index(drop=True)
     posters = list(map(movie_poster, movies.values))
     genres = movies.Genre.str.split("|")
-    print("genres: {0}".format(genres[0:1]))
+    print("genres: {0}".format(genres[:10]))
     unique_genres = unique(genres)
     print("unique genres: {0}".format(unique_genres))
     x = np.array(posters)
@@ -84,11 +77,19 @@ def max_pool_2x2(x, stride_x, stride_y):
     return tf.nn.max_pool(x, ksize=[1,2,2,1], strides=[1,stride_x,stride_y,1], padding="SAME")
 
 def compute_accuracy(v_xs, v_ys, session, prediction, xs, ys, keep_prob):
-    print(prediction)
     y_pre = session.run(prediction, feed_dict={xs: v_xs, keep_prob: 1})
-    correct_prediction = tf.equal(tf.argmax(y_pre,1), tf.argmax(v_ys,1))
-    accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-    result = session.run(accuracy, feed_dict={xs: v_xs, ys: v_ys, keep_prob: 1})
+    # -- evaluation for binary classification
+    # acc, acc_op = tf.metrics.accuracy(labels=tf.argmax(v_ys, 1), predictions=tf.argmax(y_pre, 1))
+    # session.run(tf.local_variables_initializer())
+    # print(session.run(acc_op, feed_dict={xs: v_xs, keep_prob: 1}))
+    # --
+
+    # macro f1 score for multi-label classification
+    predicted_class = session.run(tf.round(y_pre))
+    macro_f1s = []
+    for prediction, true in zip(predicted_class, v_ys):
+        macro_f1s.append(f1_score(y_true=true, y_pred=prediction, average='macro'))
+    result = session.run(tf.reduce_mean(tf.cast(macro_f1s, tf.float32)))
     return result
 
 def tf_training(x_train, y_train, x_validation, y_validation):
@@ -127,9 +128,8 @@ def tf_training(x_train, y_train, x_validation, y_validation):
     b_fc2 = bias_variable([len(movie_genres)])
     prediction = tf.nn.softmax(tf.matmul(h_fc1_drop, W_fc2) + b_fc2)
 
-    # the error between prediction and real data
-    cross_entropy = tf.reduce_mean(-tf.reduce_sum(ys * tf.log(prediction),
-                                                  reduction_indices=[1]))  # loss
+    cross_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=ys, logits=prediction))
+
     train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
 
     init = tf.global_variables_initializer()
@@ -148,46 +148,10 @@ def tf_training(x_train, y_train, x_validation, y_validation):
 
             print("epochs: {0}, accuracy: {1}".format(i, compute_accuracy(x_validation, y_validation, session, prediction, xs, ys, keep_prob)))
 
-
-def create_keras_cnn(height, width, channels, genres):
-    cnn = Sequential([
-        Conv2D(filters=16, kernel_size=(5, 5), padding='valid', activation="relu", input_shape=(height, width, channels)),
-        MaxPooling2D(pool_size=(2, 2), padding='valid'),
-        Conv2D(filters=32, kernel_size=(5, 5), padding='valid', activation='relu'),
-        MaxPooling2D(pool_size=(2, 2), padding='valid'),
-        Dropout(0.25),
-        Flatten(),
-        Dense(128, activation='relu'),
-        Dropout(0.5),
-        Dense(len(genres), activation='softmax')
-    ])
-    cnn.compile(loss=categorical_crossentropy,
-                optimizer=Adadelta(),
-                metrics=['accuracy'])
-    return cnn
-
-def keras_training():
-    model = create_keras_cnn(poster_height, poster_width, poster_channels, movie_genres)
-    model.summary()
-    model.fit(x_train, y_train,
-                    batch_size=batch_size,
-                    epochs=epochs,
-                    verbose=1,
-                    validation_data=(x_validation, y_validation))
-    (validation_loss, validation_accuracy) = model.evaluate(x_validation, y_validation, verbose=0)
-    print('\nValidation loss:', validation_loss)
-    print('Validation accuracy:', validation_accuracy)
-
 if __name__ == "__main__":
-    python_platform_path = os.path.abspath(__file__ + "/../")
-    global input_path
+    python_platform_path = os.path.abspath(__file__ + "/../../")
     input_path = Path(python_platform_path+"/MoviePosters")
     data_path = Path(python_platform_path+"/data")
-
-    global poster_height
-    global poster_width
-    global poster_channels
-    global movie_genres
 
     poster_width = 48  # 182 / 3.7916
     poster_height = 64  # 268 / 4.1875
@@ -205,5 +169,4 @@ if __name__ == "__main__":
     y_validation = y_data[separator:len(y_data)]
 
     tf_training(x_train, y_train, x_validation, y_validation)
-    keras_training()
 
